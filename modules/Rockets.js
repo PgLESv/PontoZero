@@ -52,11 +52,12 @@ module.exports = {
                     for (const evento of eventos) {
                         const eventId = evento.id;
                         const eventTime = evento.start.dateTime || evento.start.date;
-                        // Converter para UNIX timestamp em UTC-3
-                        const unixTimestamp = moment(eventTime).tz('America/Sao_Paulo').unix();
-                        const discordTimestamp = `<t:${unixTimestamp}:R>`;
-                        
+                        const eventMoment = moment(eventTime).tz('America/Sao_Paulo');
+                        const unixTimestamp = eventMoment.unix();
+                        const nowMoment = moment().tz('America/Sao_Paulo');
+
                         // Formatar a mensagem com o timestamp do Discord
+                        const discordTimestamp = nowMoment.isBefore(eventMoment) ? `<t:${unixTimestamp}:R>` : `<t:${unixTimestamp}:R> ✅`;
                         const mensagemTexto = `🚀 **${evento.summary}** está programado para ${discordTimestamp}.`;
 
                         // Verificar se o evento já foi anunciado
@@ -67,22 +68,43 @@ module.exports = {
                                 messageId: mensagem.id,
                                 summary: evento.summary,
                                 start: eventTime,
+                                completed: nowMoment.isSameOrAfter(eventMoment)
                             };
                         } else {
                             // Verificar se houve alterações no evento
                             const storedEvent = announcedEvents[eventId];
+                            let mensagemAtualizada = false;
+
                             if (storedEvent.summary !== evento.summary || storedEvent.start !== eventTime) {
                                 const mensagem = await canal.messages.fetch(storedEvent.messageId);
                                 if (mensagem) {
-                                    const novaMensagem = `🚀 **${evento.summary}** está programado para <t:${unixTimestamp}:R>.`;
-                                    await mensagem.edit(novaMensagem);
+                                    mensagemTexto = `🚀 **${evento.summary}** está programado para ${discordTimestamp}.`;
+                                    await mensagem.edit(mensagemTexto);
                                     // Atualizar informações no armazenamento
                                     announcedEvents[eventId] = {
                                         messageId: storedEvent.messageId,
                                         summary: evento.summary,
                                         start: eventTime,
+                                        completed: storedEvent.completed
                                     };
+                                    mensagemAtualizada = true;
                                 }
+                            }
+
+                            // Verificar se o lançamento já ocorreu e ainda não foi marcado como concluído
+                            if (!storedEvent.completed && nowMoment.isSameOrAfter(eventMoment)) {
+                                const mensagem = await canal.messages.fetch(storedEvent.messageId);
+                                if (mensagem) {
+                                    const novaMensagem = `🚀 **${evento.summary}** foi lançado em <t:${unixTimestamp}:F> ✅.`;
+                                    await mensagem.edit(novaMensagem);
+                                    // Atualizar o status para concluído
+                                    announcedEvents[eventId].completed = true;
+                                    mensagemAtualizada = true;
+                                }
+                            }
+
+                            if (mensagemAtualizada) {
+                                saveAnnouncedEvents(announcedEvents);
                             }
                         }
                     }
