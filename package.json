@@ -3,10 +3,12 @@
     "axios": "^1.7.9",
     "discord.js": "^14.17.3",
     "dotenv": "^16.4.7",
+    "googleapis": "^144.0.0",
+    "moment-timezone": "^0.5.46",
     "node-cron": "^3.0.3"
   },
   "scripts": {
-    "start": "node index.js",
+    "start": "npm install && node index.js",
     "dev": "nodemon index.js"
   },
   "devDependencies": {
