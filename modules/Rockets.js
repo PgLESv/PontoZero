@@ -38,17 +38,25 @@ module.exports = {
 
         async function anunciarLançamentos() {
             try {
+                // Buscar novos eventos até 1 dia atrás
                 const res = await calendar.events.list({
                     calendarId: calendarId,
-                    timeMin: new Date().toISOString(),
-                    maxResults: 10,
+                    timeMin: moment().subtract(1, 'day').toISOString(), // Inclui eventos até 1 dia atrás
+                    maxResults: 20, // Ajuste conforme necessário
                     singleEvents: true,
                     orderBy: 'startTime',
                 });
 
                 const eventos = res.data.items;
+                console.log(`[Anunciar Lançamentos] Eventos encontrados: ${eventos.length}`);
+
                 if (eventos.length) {
                     const canal = client.channels.cache.get(channelId);
+                    if (!canal) {
+                        console.error(`[Anunciar Lançamentos] Canal com ID ${channelId} não encontrado.`);
+                        return;
+                    }
+
                     for (const evento of eventos) {
                         const eventId = evento.id;
                         const eventTime = evento.start.dateTime || evento.start.date;
@@ -57,13 +65,16 @@ module.exports = {
                         const nowMoment = moment().tz('America/Sao_Paulo');
 
                         // Formatar a mensagem com o timestamp do Discord
-                        const discordTimestamp = nowMoment.isBefore(eventMoment) ? `<t:${unixTimestamp}:R>` : `<t:${unixTimestamp}:R> ✅`;
-                        const mensagemTexto = `🚀 **${evento.summary}** está programado para ${discordTimestamp}.`;
+                        const discordTimestamp = nowMoment.isBefore(eventMoment) ? `<t:${unixTimestamp}:R>` : `<t:${unixTimestamp}:F> ✅`;
+                        let mensagemTexto = `🚀 **${evento.summary}** está programado para ${discordTimestamp}.`;
+
+                        console.log(`[Analisar Evento] ID: ${eventId}, Summary: ${evento.summary}, Início: ${eventMoment.format()}, Agora: ${nowMoment.format()}`);
 
                         // Verificar se o evento já foi anunciado
                         if (!announcedEvents[eventId]) {
                             // Enviar mensagem e guardar o ID da mensagem
                             const mensagem = await canal.send(mensagemTexto);
+                            console.log(`[Enviar Mensagem] Evento ${eventId} anunciado com a mensagem ID ${mensagem.id}.`);
                             announcedEvents[eventId] = {
                                 messageId: mensagem.id,
                                 summary: evento.summary,
@@ -78,8 +89,9 @@ module.exports = {
                             if (storedEvent.summary !== evento.summary || storedEvent.start !== eventTime) {
                                 const mensagem = await canal.messages.fetch(storedEvent.messageId);
                                 if (mensagem) {
-                                    mensagemTexto = `🚀 **${evento.summary}** está programado para ${discordTimestamp}.`;
+                                    mensagemTexto = `🚀 **${evento.summary}** está programado para <t:${unixTimestamp}:R>.`;
                                     await mensagem.edit(mensagemTexto);
+                                    console.log(`[Editar Mensagem] Evento ${eventId} atualizado com a nova mensagem.`);
                                     // Atualizar informações no armazenamento
                                     announcedEvents[eventId] = {
                                         messageId: storedEvent.messageId,
@@ -88,6 +100,8 @@ module.exports = {
                                         completed: storedEvent.completed
                                     };
                                     mensagemAtualizada = true;
+                                } else {
+                                    console.warn(`[Editar Mensagem] Mensagem com ID ${storedEvent.messageId} não encontrada.`);
                                 }
                             }
 
@@ -97,14 +111,18 @@ module.exports = {
                                 if (mensagem) {
                                     const novaMensagem = `🚀 **${evento.summary}** foi lançado em <t:${unixTimestamp}:F> ✅.`;
                                     await mensagem.edit(novaMensagem);
+                                    console.log(`[Atualizar Conclusão] Evento ${eventId} marcado como concluído.`);
                                     // Atualizar o status para concluído
                                     announcedEvents[eventId].completed = true;
                                     mensagemAtualizada = true;
+                                } else {
+                                    console.warn(`[Atualizar Conclusão] Mensagem com ID ${storedEvent.messageId} não encontrada.`);
                                 }
                             }
 
                             if (mensagemAtualizada) {
                                 saveAnnouncedEvents(announcedEvents);
+                                console.log(`[Salvar Eventos] Eventos anunciados atualizados.`);
                             }
                         }
                     }
@@ -113,12 +131,46 @@ module.exports = {
                 } else {
                     console.log('Nenhum lançamento encontrado.');
                 }
+
+                // Iterar sobre todos os eventos armazenados para verificar se foram concluídos
+                for (const [eventId, storedEvent] of Object.entries(announcedEvents)) {
+                    if (!storedEvent.completed) {
+                        const eventMoment = moment(storedEvent.start).tz('America/Sao_Paulo');
+                        const nowMoment = moment().tz('America/Sao_Paulo');
+
+                        if (nowMoment.isSameOrAfter(eventMoment)) {
+                            try {
+                                const canal = client.channels.cache.get(channelId);
+                                if (!canal) {
+                                    console.error(`[Verificação Conclusão] Canal com ID ${channelId} não encontrado.`);
+                                    continue;
+                                }
+
+                                const mensagem = await canal.messages.fetch(storedEvent.messageId);
+                                if (mensagem) {
+                                    const unixTimestamp = eventMoment.unix();
+                                    const novaMensagem = `🚀 **${storedEvent.summary}** foi lançado em <t:${unixTimestamp}:F> ✅.`;
+                                    await mensagem.edit(novaMensagem);
+                                    console.log(`[Verificação Conclusão] Evento ${eventId} marcado como concluído.`);
+                                    // Atualizar o status para concluído
+                                    announcedEvents[eventId].completed = true;
+                                    saveAnnouncedEvents(announcedEvents);
+                                } else {
+                                    console.warn(`[Verificação Conclusão] Mensagem com ID ${storedEvent.messageId} não encontrada.`);
+                                }
+                            } catch (error) {
+                                console.error(`[Verificação Conclusão] Erro ao marcar evento ${eventId} como concluído:`, error);
+                            }
+                        }
+                    }
+                }
+
             } catch (error) {
                 console.error('Erro ao buscar eventos:', error);
             }
         }
 
         anunciarLançamentos();
-        setInterval(anunciarLançamentos, 3600000); // Verifica a cada hora
+        setInterval(anunciarLançamentos, 1800000); // Verifica a cada 30 minutos para teste
     },
 };
