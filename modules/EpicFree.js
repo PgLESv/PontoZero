@@ -2,11 +2,11 @@ const { EmbedBuilder } = require('discord.js');
 const cron = require('node-cron');
 const fs = require('fs');
 const path = require('path');
+require('dotenv').config();
 
-const CHANNEL_ID = '1173633585513758770'; // Substitua pelo ID do seu canal
+const CHANNEL_ID = process.env.CHANNEL_EPIC_ID;
 const LAST_FREE_GAMES_FILE = path.join(__dirname, '..', 'lastFreeGames.json');
 
-// Função para carregar lastFreeGames
 function loadLastFreeGames() {
     if (fs.existsSync(LAST_FREE_GAMES_FILE)) {
         const data = fs.readFileSync(LAST_FREE_GAMES_FILE, 'utf-8');
@@ -23,7 +23,6 @@ function loadLastFreeGames() {
     return [];
 }
 
-// Função para salvar lastFreeGames
 function saveLastFreeGames(ids) {
     fs.writeFileSync(LAST_FREE_GAMES_FILE, JSON.stringify(ids, null, 2), 'utf-8');
     console.log('lastFreeGames salvo com sucesso:', ids);
@@ -42,7 +41,6 @@ async function fetchFreeGames() {
 
         const data = await response.json();
 
-        // Verificar se a resposta contém dados válidos
         if (!data || !data.data || !data.data.Catalog || !data.data.Catalog.searchStore || !data.data.Catalog.searchStore.elements) {
             console.error('Estrutura de dados inesperada na resposta da API.');
             return;
@@ -50,13 +48,11 @@ async function fetchFreeGames() {
 
         const elements = data.data.Catalog.searchStore.elements;
 
-        // Logar todos os títulos de jogos recebidos
         console.log('Jogos recebidos da API:');
         elements.forEach(game => {
             console.log(`- ${game.title}`);
         });
 
-        // Verificar se "Turmoil" está presente
         const turmoil = elements.find(game => game.title.toLowerCase() === 'turmoil');
         if (turmoil) {
             console.log('Jogo "Turmoil" encontrado:', turmoil);
@@ -65,7 +61,6 @@ async function fetchFreeGames() {
             console.log('Jogo "Turmoil" não foi encontrado nos elementos.');
         }
 
-        // Filtrar apenas os jogos que têm ofertas promocionais com 100% de desconto e atualmente ativos
         const freeGames = elements.filter(game => {
             if (!game.promotions || !game.promotions.promotionalOffers) return false;
             return game.promotions.promotionalOffers.some(offerPeriod => {
@@ -76,16 +71,12 @@ async function fetchFreeGames() {
                     const endDate = promo.endDate ? new Date(promo.endDate) : null;
                     const now = new Date();
 
-                    // Logar detalhes da promoção
                     console.log(`Detalhes da promoção para "${game.title}":`, JSON.stringify(promo, null, 2));
 
-                    // Converter discount para número se necessário
                     const discountNumber = Number(discount);
 
-                    // Verificar se o preço descontado é zero
                     const discountPrice = game.price && game.price.totalPrice && game.price.totalPrice.discountPrice;
 
-                    // Condição para considerar jogo gratuito
                     return (discountNumber === 100 || discountPrice === 0) && startDate && endDate && now >= startDate && now <= endDate;
                 });
             });
@@ -93,12 +84,10 @@ async function fetchFreeGames() {
 
         console.log(`Total de jogos gratuitos encontrados: ${freeGames.length}`);
 
-        // Logar os títulos dos jogos gratuitos encontrados
         freeGames.forEach(game => {
             console.log(`Jogo gratuito detectado: ${game.title}`);
         });
 
-        // Filtrar jogos que ainda não foram anunciados
         const newFreeGames = freeGames.filter(game => !lastFreeGames.includes(game.id));
 
         console.log(`Novos jogos gratuitos a serem anunciados: ${newFreeGames.length}`);
@@ -113,16 +102,13 @@ async function fetchFreeGames() {
 
             newFreeGames.forEach(game => {
                 const gameTitle = game.title;
-                // Utilizar productSlug ou urlSlug para construir a URL
                 const pageSlug = (game.offerMappings && game.offerMappings[0].pageSlug) || game.productSlug || game.urlSlug;
                 if (!pageSlug) {
                     console.log(`Jogo "${gameTitle}" não possui slug válido. Ignorando.`);
                     return;
                 }
-                // Atualizar a URL base para 'store.epicgames.com'
                 const gameUrl = `https://store.epicgames.com/pt-BR/p/${pageSlug}`;
 
-                // Encontrar a imagem apropriada
                 let thumbnailUrl = null;
                 const thumbnailTypes = ['DieselStoreFrontWide', 'OfferImageWide', 'VaultClosed'];
 
@@ -133,7 +119,6 @@ async function fetchFreeGames() {
                         break;
                     }
                 }
-                // Fallback para uma imagem placeholder se nenhuma imagem adequada for encontrada
                 thumbnailUrl = thumbnailUrl || 'https://via.placeholder.com/150';
 
                 const embed = new EmbedBuilder()
@@ -158,13 +143,12 @@ async function fetchFreeGames() {
 }
 
 function scheduleEpicFreeBot(clientInstance) {
-    global.client = clientInstance; // Para acessar o client no módulo
+    global.client = clientInstance;
     cron.schedule('00 12 * * *', () => {
         console.log('Verificando jogos gratuitos no Epic Games...');
         fetchFreeGames();
     });
 
-    // Execução imediata ao iniciar
     fetchFreeGames();
 }
 
