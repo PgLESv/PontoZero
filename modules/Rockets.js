@@ -18,7 +18,6 @@ const db = new sqlite3.Database(dbPath, sqlite3.OPEN_READWRITE | sqlite3.OPEN_CR
 // Definir o busyTimeout para 5 segundos
 db.configure("busyTimeout", 5000);
 
-// Inicializar banco de dados com as colunas 'status', 'real_date' e 'real_time'
 db.serialize(() => {
     db.run(`CREATE TABLE IF NOT EXISTS launches (
         id TEXT PRIMARY KEY,
