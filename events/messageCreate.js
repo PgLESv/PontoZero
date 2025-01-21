@@ -1,4 +1,4 @@
-const CHANNEL_ID = '1301603798577582091';
+const CHANNEL_ID = process.env.SMASH_ID;
 
 module.exports = {
     name: 'messageCreate',

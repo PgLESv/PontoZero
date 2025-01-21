@@ -144,7 +144,7 @@ async function fetchFreeGames() {
 
 function scheduleEpicFreeBot(clientInstance) {
     global.client = clientInstance;
-    cron.schedule('00 12 * * *', () => {
+    cron.schedule('00 15 * * *', () => {
         console.log('Verificando jogos gratuitos no Epic Games...');
         fetchFreeGames();
     });

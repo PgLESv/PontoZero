@@ -1,23 +1,252 @@
 const { google } = require('googleapis');
 const path = require('path');
-const fs = require('fs');
-const moment = require('moment-timezone');
 const axios = require('axios');
 const cheerio = require('cheerio');
+const sqlite3 = require('sqlite3').verbose();
+const { Client } = require('discord.js');
 require('dotenv').config();
 
-const ANNOUNCED_EVENTS_FILE = path.resolve(__dirname, '../config/announcedEvents.json');
-
-function loadAnnouncedEvents() {
-    if (!fs.existsSync(ANNOUNCED_EVENTS_FILE)) {
-        fs.writeFileSync(ANNOUNCED_EVENTS_FILE, JSON.stringify({}));
+const dbPath = path.resolve(__dirname, '../config/rockets.db');
+const db = new sqlite3.Database(dbPath, sqlite3.OPEN_READWRITE | sqlite3.OPEN_CREATE, (err) => {
+    if (err) {
+        console.error('Erro ao conectar ao banco de dados:', err);
+    } else {
+        console.log('Conectado ao banco de dados SQLite.');
     }
-    const data = fs.readFileSync(ANNOUNCED_EVENTS_FILE, 'utf-8');
-    return JSON.parse(data);
+});
+
+// Definir o busyTimeout para 5 segundos
+db.configure("busyTimeout", 5000);
+
+// Inicializar banco de dados com as colunas 'status', 'real_date' e 'real_time'
+db.serialize(() => {
+    db.run(`CREATE TABLE IF NOT EXISTS launches (
+        id TEXT PRIMARY KEY,
+        name TEXT,
+        date TEXT,
+        time TEXT,
+        link TEXT,
+        status TEXT DEFAULT 'pending',
+        real_date TEXT,
+        real_time TEXT,
+        message_id TEXT
+    )`, (err) => {
+        if (err) {
+            console.error('Erro ao criar tabela launches:', err);
+        }
+    });
+});
+
+async function fetchAndStoreEvents(calendar, calendarId, client) {
+    const now = new Date();
+    const oneMonthLater = new Date();
+    oneMonthLater.setMonth(oneMonthLater.getMonth() + 1);
+
+    try {
+        const res = await calendar.events.list({
+            calendarId: calendarId,
+            timeMin: now.toISOString(),
+            timeMax: oneMonthLater.toISOString(),
+            singleEvents: true,
+            orderBy: 'startTime',
+        });
+
+        const eventos = res.data.items;
+        console.log(`Eventos encontrados: ${eventos.length}`);
+
+        return new Promise((resolve, reject) => {
+            db.serialize(() => {
+                db.run("BEGIN TRANSACTION;");
+
+                const stmt = db.prepare(`INSERT OR IGNORE INTO launches (id, name, date, time, link) VALUES (?, ?, ?, ?, ?)`);
+                const inserirEvento = async (evento, callback) => {
+                    const eventId = evento.id;
+                    const eventName = evento.summary;
+                    const eventDate = evento.start.dateTime || evento.start.date;
+
+                    const descricao = evento.description || '';
+                    console.log(`\nDescrição do Evento (${eventName}):\n${descricao}\n`);
+
+                    // Extração do link
+                    let linkMatch = descricao.match(/more info:\s*([^\s]+)/i);
+                    let link = '';
+
+                    if (linkMatch && linkMatch[1]) {
+                        link = linkMatch[1];
+                        console.log(`Link capturado após "more info:": ${link}`);
+                    } else {
+                        linkMatch = descricao.match(/(?:https?:\/\/)?(?:www\.)?[^\s]+\.[^\s]+/i);
+                        link = linkMatch ? linkMatch[0] : '';
+                        if (link) {
+                            console.log(`Link capturado com regex fallback: ${link}`);
+                        } else {
+                            console.log('Nenhum link encontrado na descrição.');
+                        }
+                    }
+
+                    // Adicionar 'https://' se o link não possui protocolo
+                    if (link && !/^https?:\/\//i.test(link)) {
+                        link = `https://${link}`;
+                        console.log(`Link ajustado com protocolo: ${link}`);
+                    }
+
+                    const dateObj = new Date(eventDate);
+                    const unixTimestamp = Math.floor(dateObj.getTime() / 1000);
+
+                    stmt.run(eventId, eventName, dateObj.toISOString(), dateObj.toISOString(), link, async function(err) {
+                        if (err) {
+                            console.error(`Erro ao inserir evento ${eventId}:`, err);
+                        } else {
+                            // Verifica se a linha foi realmente inserida
+                            if (this.changes > 0) {
+                                const channel = await client.channels.fetch(process.env.CHANNEL_ROCKETS_ID);
+                                const message = await channel.send(`🚀 **${eventName}** está programado para <t:${unixTimestamp}:R>. - [Mais informações](${link})`);
+                                db.run(`UPDATE launches SET message_id = ? WHERE id = ?`, [message.id, eventId]);
+                            } else {
+                                console.log(`Evento ${eventName} já existe no banco de dados. Nenhuma mensagem enviada.`);
+                            }
+                        }
+                        callback();
+                    });
+                };
+
+                const inserirSequencialmente = (eventos, index = 0) => {
+                    if (index >= eventos.length) {
+                        stmt.finalize((err) => {
+                            if (err) {
+                                db.run("ROLLBACK;");
+                                reject(err);
+                            } else {
+                                db.run("COMMIT;", (commitErr) => {
+                                    if (commitErr) {
+                                        console.error('Erro ao commitar transação:', commitErr);
+                                        reject(commitErr);
+                                    } else {
+                                        console.log('Transação de inserção concluída com sucesso.');
+                                        resolve();
+                                    }
+                                });
+                            }
+                        });
+                        return;
+                    }
+
+                    inserirEvento(eventos[index], () => {
+                        inserirSequencialmente(eventos, index + 1);
+                    });
+                };
+
+                inserirSequencialmente(eventos);
+            });
+        });
+    } catch (error) {
+        console.error('Erro ao buscar eventos:', error);
+    }
 }
 
-function saveAnnouncedEvents(events) {
-    fs.writeFileSync(ANNOUNCED_EVENTS_FILE, JSON.stringify(events, null, 2));
+// Função para verificar o status do lançamento
+async function verificarStatusLançamento(client) {
+    return new Promise((resolve, reject) => {
+        // Selecionar lançamentos com status 'pending'
+        db.all(`SELECT * FROM launches WHERE status = 'pending'`, async (err, rows) => {
+            if (err) {
+                console.error('Erro ao buscar lançamentos pendentes:', err);
+                return reject(err);
+            }
+
+            for (const launch of rows) {
+                try {
+                    const response = await axios.get(launch.link);
+                    const html = response.data;
+                    const $ = cheerio.load(html);
+
+                    // Extrair o status
+                    const statusText = $('h6.rcorners.status span').text().trim().toLowerCase();
+                    console.log(`\nVerificando lançamento: ${launch.name}`);
+                    console.log(`Status extraído: ${statusText}`);
+
+                    let status = 'pending';
+                    if (statusText === 'success') {
+                        status = 'success';
+                    } else if (statusText === 'failure') {
+                        status = 'failure';
+                    }
+
+                    // Extrair o horário real de lançamento
+                    let realLaunchTimeText = $('span#localized').text().trim();
+                    console.log(`Horário real extraído do span#localized: "${realLaunchTimeText}"`);
+
+                    // Verificar se o span existe e contém um horário válido
+                    if (!realLaunchTimeText) {
+                        // Extrair o texto após "Launch Time" se o span não existir
+                        realLaunchTimeText = $('strong:contains("Launch Time")').parent().text().replace('Launch Time', '').trim();
+                        console.log(`Horário real extraído do texto após "Launch Time": "${realLaunchTimeText}"`);
+                    }
+
+                    let realLaunchDate = null;
+                    let realLaunchTime = null;
+                    let unixTimestamp = null;
+
+                    // Verificar se o texto contém uma data válida ou "NET"
+                    if (realLaunchTimeText.toUpperCase().startsWith('NET')) {
+                        console.log(`Lançamento ${launch.name} ainda está previsto para ${realLaunchTimeText}.`);
+                        // Manter status como 'pending' e não atualizar data/hora real
+                    } else {
+                        // Tentar parsear a data
+                        let parsedDate = new Date(realLaunchTimeText);
+                        console.log(`Data parseada inicialmente: ${parsedDate}`);
+
+                        // Se a data não for válida, tentar ajustar o formato
+                        if (isNaN(parsedDate)) {
+                            // Remover possíveis caracteres indesejados
+                            const cleanedText = realLaunchTimeText.replace(/BRT|BST|UTC|GMT|\+[\d]{4}/g, '').trim();
+                            console.log(`Tentando parsear a data limpa: "${cleanedText}"`);
+                            parsedDate = new Date(cleanedText);
+                            console.log(`Data parseada após limpeza: ${parsedDate}`);
+                        }
+
+                        if (!isNaN(parsedDate)) {
+                            realLaunchDate = parsedDate.toLocaleDateString('pt-BR');
+                            realLaunchTime = parsedDate.toLocaleTimeString('pt-BR');
+                            unixTimestamp = Math.floor(parsedDate.getTime() / 1000);
+                            console.log(`Data real parseada: ${realLaunchDate}`);
+                            console.log(`Hora real parseada: ${realLaunchTime}`);
+                        } else {
+                            console.log(`Formato de data inválido para o lançamento ${launch.name}: "${realLaunchTimeText}".`);
+                        }
+                    }
+
+                    // Atualizar o status e, se disponível, o horário real no banco de dados
+                    if (status !== 'pending') {
+                        db.run(
+                            `UPDATE launches SET status = ?, real_date = ?, real_time = ? WHERE id = ?`,
+                            [status, realLaunchDate, realLaunchTime, launch.id],
+                            async function(err) {
+                                if (err) {
+                                    console.error(`Erro ao atualizar dados para o lançamento ${launch.id}:`, err);
+                                } else {
+                                    console.log(
+                                        `Dados atualizados para o lançamento ${launch.name}: Status=${status}, Real Date=${realLaunchDate || 'NULL'}, Real Time=${realLaunchTime || 'NULL'}`
+                                    );
+                                    const channel = await client.channels.fetch(process.env.CHANNEL_ROCKETS_ID);
+                                    const message = await channel.messages.fetch(launch.message_id);
+                                    await message.edit(`🚀 **${launch.name}** foi lançado em <t:${unixTimestamp}:R>. Status: ${status === 'success' ? '✅ Sucesso' : '❌ Falha'} - [Mais informações](${launch.link})`);
+                                }
+                            }
+                        );
+
+                        // Logar o status atualizado
+                        console.log(`Lançamento ${launch.name} concluído com status: ${status}.`);
+                    }
+
+                } catch (error) {
+                    console.error(`Erro ao verificar status do lançamento ${launch.id}:`, error);
+                }
+            }
+
+            resolve();
+        });
+    });
 }
 
 module.exports = {
@@ -31,241 +260,35 @@ module.exports = {
 
         const calendar = google.calendar({ version: 'v3', auth });
         const calendarId = process.env.CALENDAR_ID;
-        const channelId = process.env.CHANNEL_ROCKETS_ID;
 
-        const announcedEvents = loadAnnouncedEvents();
-        await anunciarLancamentos();
-
-        // Função para verificar o status do lançamento
-        async function verificarStatusLancamento(link) {
-            try {
-                console.log(`🔗 Acessando o link: ${link}`);
-                const response = await axios.get(link);
-                const html = response.data;
-                console.log('📄 HTML da página obtido com sucesso.');
-
-                const $ = cheerio.load(html); // Definindo `$` com Cheerio
-
-                // Seleciona o span que contém o status
-                const statusSpan = $('h6.rcorners.status span').first();
-                const statusTexto = statusSpan.text().trim();
-                console.log(`📈 Status encontrado: ${statusTexto}`);
-
-                let motivo = null;
-
-                if (statusTexto === 'Failure') {
-                    // Seleciona o parágrafo que contém o motivo da falha
-                    const motivoParagrafo = $('div.mdl-card__supporting-text p').first();
-                    motivo = motivoParagrafo.text().trim();
-                    console.log(`📝 Motivo da Falha: ${motivo}`);
-                }        
-
-                return { status: statusTexto, motivo };
-            } catch (error) {
-                console.error(`Erro ao verificar status do lançamento em ${link}:`, error);
-                return { status: null, motivo: null };
-            }
+        try {
+            await fetchAndStoreEvents(calendar, calendarId, client);
+            await verificarStatusLançamento(client); // Executa a verificação após armazenar eventos
+        } catch (error) {
+            console.error('Erro ao executar fetchAndStoreEvents:', error);
         }
 
-        async function anunciarLancamentos() {
-            try {
-                const now = new Date();
-                const twoMonthsLater = new Date();
-                twoMonthsLater.setMonth(twoMonthsLater.getMonth() + 2);
-        
-                // Buscar eventos do Google Calendar
-                const res = await calendar.events.list({
-                    calendarId: calendarId,
-                    timeMin: now.toISOString(),
-                    timeMax: twoMonthsLater.toISOString(),
-                    singleEvents: true,
-                    orderBy: 'startTime',
-                });
-        
-                const eventos = res.data.items;
-                console.log(`[Anunciar Lançamentos] Eventos encontrados: ${eventos.length}`);
-        
-                if (!eventos.length) {
-                    console.log('Nenhum lançamento encontrado na Calendar.');
-                }
-        
-                const canal = client.channels.cache.get(channelId);
-                if (!canal) {
-                    console.error(`[Anunciar Lançamentos] Canal com ID ${channelId} não encontrado.`);
-                    return;
-                }
-        
-                // Processar eventos da Calendar
-                for (const evento of eventos) {
-                    const eventId = evento.id;
-                    const eventTime = evento.start.dateTime || evento.start.date;
-                    const eventMoment = moment(eventTime).tz('America/Sao_Paulo');
-                    const unixTimestamp = eventMoment.unix();
-                    const nowMoment = moment().tz('America/Sao_Paulo');
-        
-                    // Extrair o link da descrição
-                    const description = evento.description || '';
-                    let linkMatch = description.match(/https?:\/\/\S+|www\.\S+|\S+\.\S+/);
-                    let link = linkMatch ? linkMatch[0] : null;
-        
-                    // Adicionar 'https://' se o link não possui protocolo
-                    if (link && !/^https?:\/\//i.test(link)) {
-                        link = `https://${link}`;
-                    }
-        
-                    // Formatar a mensagem com o timestamp do Discord
-                    const discordTimestamp = nowMoment.isBefore(eventMoment)
-                        ? `<t:${unixTimestamp}:R>`
-                        : `<t:${unixTimestamp}:F> ✅`;
-                    let mensagemTexto = `🚀 **${evento.summary}** está programado para ${discordTimestamp}.`;
-        
-                    // Adicionar o link se existir
-                    if (link) {
-                        mensagemTexto += ` - [Mais informações](${link})`;
-                    }
-        
-                    console.log(`[Analisar Evento] ID: ${eventId}, Summary: ${evento.summary}, Início: ${eventMoment.format()}, Agora: ${nowMoment.format()}`);
-                    console.log(`Descrição do evento (${eventId}):`, description);
-                    console.log(`Link extraído:`, link);
-        
-                    // Verificar se o evento já foi anunciado
-                    if (!announcedEvents[eventId]) {
-                        // Enviar mensagem e guardar o ID da mensagem
-                        const mensagem = await canal.send(mensagemTexto);
-                        console.log(`[Enviar Mensagem] Evento ${eventId} anunciado com a mensagem ID ${mensagem.id}.`);
-                        announcedEvents[eventId] = {
-                            messageId: mensagem.id,
-                            summary: evento.summary,
-                            start: eventTime,
-                            completed: nowMoment.isSameOrAfter(eventMoment),
-                            link: link,
-                            status: null,
-                            motivo: null,
-                        };
-                    } else {
-                        // Verificar se houve alterações no evento
-                        const storedEvent = announcedEvents[eventId];
-                        let mensagemAtualizada = false;
-        
-                        if (storedEvent.summary !== evento.summary || storedEvent.start !== eventTime) {
-                            const mensagem = await canal.messages.fetch(storedEvent.messageId);
-                            if (mensagem) {
-                                let novaMensagem = `🚀 **${evento.summary}** está programado para <t:${unixTimestamp}:R>.`;
-                                if (link) {
-                                    novaMensagem += ` - [Mais informações](${link})`;
-                                }
-                                await mensagem.edit(novaMensagem);
-                                console.log(`[Editar Mensagem] Evento ${eventId} atualizado com a nova mensagem.`);
-                                // Atualizar informações no armazenamento incluindo o link
-                                announcedEvents[eventId] = {
-                                    messageId: storedEvent.messageId,
-                                    summary: evento.summary,
-                                    start: eventTime,
-                                    completed: storedEvent.completed,
-                                    link: link,
-                                    status: storedEvent.status,
-                                    motivo: storedEvent.motivo,
-                                };
-                                mensagemAtualizada = true;
-                            } else {
-                                console.warn(`[Editar Mensagem] Mensagem com ID ${storedEvent.messageId} não encontrada.`);
-                            }
-                        }
-        
-                        // Verificar se o lançamento já ocorreu e ainda não foi marcado como concluído
-                        if (!storedEvent.completed && nowMoment.isSameOrAfter(eventMoment)) {
-                            // Verificar o status do lançamento acessando o link
-                            let statusInfo = { status: null, motivo: null };
-                            if (link) {
-                                statusInfo = await verificarStatusLancamento(link);
-                            }
-        
-                            const mensagem = await canal.messages.fetch(storedEvent.messageId);
-                            if (mensagem) {
-                                let novaMensagem = `🚀 **${evento.summary}** foi lançado em <t:${unixTimestamp}:F> ✅.`;
-                                if (statusInfo.status === 'Failure' && statusInfo.motivo) {
-                                    novaMensagem += `\n**Motivo do Failure:** ${statusInfo.motivo}`;
-                                }
-                                await mensagem.edit(novaMensagem);
-                                console.log(`[Atualizar Conclusão] Evento ${eventId} marcado como concluído.`);
-                                // Atualizar o status para concluído e salvar a informação do status
-                                announcedEvents[eventId] = {
-                                    ...storedEvent,
-                                    completed: true,
-                                    status: statusInfo.status,
-                                    motivo: statusInfo.motivo,
-                                };
-                                mensagemAtualizada = true;
-                            } else {
-                                console.warn(`[Atualizar Conclusão] Mensagem com ID ${storedEvent.messageId} não encontrada.`);
-                            }
-                        }
-        
-                        if (mensagemAtualizada) {
-                            saveAnnouncedEvents(announcedEvents);
-                            console.log(`[Salvar Eventos] Eventos anunciados atualizados.`);
-                        }
-                    }
-                }
-        
-                // **Processar eventos que já foram anunciados mas não estão mais na Calendar**
-                console.log(`[Anunciar Lançamentos] Processando eventos anunciados previamente...`);
-                for (const eventId in announcedEvents) {
-                    if (!eventos.find(evento => evento.id === eventId)) {
-                        console.log(`[Processar Externo] Evento ${eventId} não está na Calendar. Iniciando verificação...`);
-                        const evento = announcedEvents[eventId];
-                        const eventTime = evento.start;
-                        const eventMoment = moment(eventTime).tz('America/Sao_Paulo');
-                        const nowMoment = moment().tz('America/Sao_Paulo');
-        
-                        // Remover a condição de tempo para permitir verificação independente
-                        if (!evento.completed) {
-                            let statusInfo = { status: null, motivo: null };
-                            if (evento.link) {
-                                statusInfo = await verificarStatusLancamento(evento.link);
-                            }
-        
-                            const mensagem = await canal.messages.fetch(evento.messageId);
-                            if (mensagem) {
-                                let novaMensagem = `🚀 **${evento.summary}** foi lançado em <t:${eventMoment.unix()}:F> ✅.`;
-                                if (statusInfo.status === 'Failure' && statusInfo.motivo) {
-                                    novaMensagem += `\n**❌ Motivo do Failure:** ${statusInfo.motivo}`;
-                                }
-                                try {
-                                    await mensagem.edit(novaMensagem);
-                                    console.log(`[Atualizar Conclusão Externa] Evento ${eventId} marcado como concluído.`);
-                                    // Atualizar o status para concluído e salvar a informação do status
-                                    announcedEvents[eventId] = {
-                                        ...evento,
-                                        completed: true,
-                                        status: statusInfo.status,
-                                        motivo: statusInfo.motivo,
-                                    };
-                                    saveAnnouncedEvents(announcedEvents);
-                                } catch (error) {
-                                    console.error(`[Atualizar Conclusão Externa] Erro ao atualizar a mensagem do evento ${eventId}:`, error);
-                                }
-                            } else {
-                                console.warn(`[Atualizar Conclusão Externa] Mensagem com ID ${evento.messageId} não encontrada.`);
-                            }
-                        } else {
-                            console.log(`[Processar Externo] Evento ${eventId} já está concluído.`);
-                        }
-                    }
-                }
-        
-                // Salvar os eventos anunciados após o processamento
-                saveAnnouncedEvents(announcedEvents);
-                console.log(`[Salvar Eventos] Eventos anunciados atualizados.`);
-            } catch (error) {
-                console.error('Erro ao buscar eventos:', error);
-            }
-        }
-
-        // Listener para comandos de chat (ex: !testestatus <eventId>)
-        client.on('messageCreate', async (message) => {
-        });
-
-        setInterval(anunciarLancamentos, 1800000); // Verificar a cada 30 minutos
+        // Agendar verificações periódicas
+        setInterval(() => {
+            verificarStatusLançamento(client)
+                .then(() => console.log('Verificação de status concluída.'))
+                .catch(err => console.error('Erro na verificação de status:', err));
+        }, 60 * 60 * 1000); // 60 minutos
     },
 };
+
+// Para testar o arquivo isoladamente
+if (require.main === module) {
+    const client = {
+        channels: {
+            cache: new Map(),
+        },
+    };
+    module.exports.execute(client).then(() => {
+        console.log('Teste concluído.');
+        db.close();
+    }).catch(err => {
+        console.error('Erro no teste:', err);
+        db.close();
+    });
+}
