@@ -53,14 +53,6 @@ async function fetchFreeGames() {
             console.log(`- ${game.title}`);
         });
 
-        const turmoil = elements.find(game => game.title.toLowerCase() === 'turmoil');
-        if (turmoil) {
-            console.log('Jogo "Turmoil" encontrado:', turmoil);
-            console.log('Detalhes das promoções do Turmoil:', JSON.stringify(turmoil.promotions, null, 2));
-        } else {
-            console.log('Jogo "Turmoil" não foi encontrado nos elementos.');
-        }
-
         const freeGames = elements.filter(game => {
             if (!game.promotions || !game.promotions.promotionalOffers) return false;
             return game.promotions.promotionalOffers.some(offerPeriod => {
@@ -102,7 +94,7 @@ async function fetchFreeGames() {
 
             newFreeGames.forEach(game => {
                 const gameTitle = game.title;
-                const pageSlug = (game.offerMappings && game.offerMappings[0].pageSlug) || game.productSlug || game.urlSlug;
+                const pageSlug = (game.offerMappings && game.offerMappings[0] && game.offerMappings[0].pageSlug) || game.productSlug || game.urlSlug;
                 if (!pageSlug) {
                     console.log(`Jogo "${gameTitle}" não possui slug válido. Ignorando.`);
                     return;

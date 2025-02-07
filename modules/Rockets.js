@@ -62,7 +62,6 @@ async function fetchAndStoreEvents(calendar, calendarId, client) {
                     const eventId = evento.id;
                     const eventName = evento.summary;
                     const eventDate = evento.start.dateTime || evento.start.date;
-
                     const descricao = evento.description || '';
                     console.log(`\nDescrição do Evento (${eventName}):\n${descricao}\n`);
 
@@ -92,20 +91,45 @@ async function fetchAndStoreEvents(calendar, calendarId, client) {
                     const dateObj = new Date(eventDate);
                     const unixTimestamp = Math.floor(dateObj.getTime() / 1000);
 
-                    stmt.run(eventId, eventName, dateObj.toISOString(), dateObj.toISOString(), link, async function(err) {
+
+                    // Verificar se já existe um registro com o mesmo link
+                    db.get("SELECT * FROM launches WHERE link = ?", [link], async (err, row) => {
                         if (err) {
-                            console.error(`Erro ao inserir evento ${eventId}:`, err);
-                        } else {
-                            // Verifica se a linha foi realmente inserida
-                            if (this.changes > 0) {
-                                const channel = await client.channels.fetch(process.env.CHANNEL_ROCKETS_ID);
-                                const message = await channel.send(`🚀 **${eventName}** está programado para <t:${unixTimestamp}:R>. - [Mais informações](${link})`);
-                                db.run(`UPDATE launches SET message_id = ? WHERE id = ?`, [message.id, eventId]);
-                            } else {
-                                console.log(`Evento ${eventName} já existe no banco de dados. Nenhuma mensagem enviada.`);
-                            }
+                            console.error(`Erro ao verificar evento existente para o link ${link}:`, err);
+                            return callback();
                         }
-                        callback();
+                        if (row) {
+                            // Atualizar o registro existente com os novos dados
+                            console.log(`Evento com link ${link} já existe, atualizando o registro...`);
+                            db.run(
+                                "UPDATE launches SET id = ?, name = ?, date = ?, time = ? WHERE link = ?",
+                                [eventId, eventName, dateObj.toISOString(), dateObj.toISOString(), link],
+                                (updateErr) => {
+                                    if (updateErr) {
+                                        console.error(`Erro ao atualizar evento com link ${link}:`, updateErr);
+                                    }
+                                    // Não enviar nova mensagem, pois o anúncio já foi realizado.
+                                    return callback();
+                                }
+                            );
+                        } else {
+                            // Inserir o novo evento e enviar a mensagem do Discord
+                            stmt.run(eventId, eventName, dateObj.toISOString(), dateObj.toISOString(), link, async function(err) {
+                                if (err) {
+                                    console.error(`Erro ao inserir evento ${eventId}:`, err);
+                                } else {
+                                    // Verifica se a linha foi realmente inserida
+                                    if (this.changes > 0) {
+                                        const channel = await client.channels.fetch(process.env.CHANNEL_ROCKETS_ID);
+                                        const message = await channel.send(`🚀 **${eventName}** está programado para <t:${unixTimestamp}:R>. - [Mais informações](${link})`);
+                                        db.run(`UPDATE launches SET message_id = ? WHERE id = ?`, [message.id, eventId]);
+                                    } else {
+                                        console.log(`Evento ${eventName} já existe no banco de dados. Nenhuma mensagem enviada.`);
+                                    }
+                                }
+                                callback();
+                            });
+                        }
                     });
                 };
 
@@ -159,8 +183,12 @@ async function verificarStatusLançamento(client) {
                     const html = response.data;
                     const $ = cheerio.load(html);
 
-                    // Extrair o status
-                    const statusText = $('h6.rcorners.status span').text().trim().toLowerCase();
+                    // Tentar extrair o status com o seletor padrão
+                    let statusText = $('h6.rcorners.status span').text().trim().toLowerCase();
+                    // Se não encontrar, utilizar seletor alternativo
+                    if (!statusText) {
+                        statusText = $('h6.rcorners.suborbital span').text().trim().toLowerCase();
+                    }
                     console.log(`\nVerificando lançamento: ${launch.name}`);
                     console.log(`Status extraído: ${statusText}`);
 
@@ -175,9 +203,7 @@ async function verificarStatusLançamento(client) {
                     let realLaunchTimeText = $('span#localized').text().trim();
                     console.log(`Horário real extraído do span#localized: "${realLaunchTimeText}"`);
 
-                    // Verificar se o span existe e contém um horário válido
                     if (!realLaunchTimeText) {
-                        // Extrair o texto após "Launch Time" se o span não existir
                         realLaunchTimeText = $('strong:contains("Launch Time")').parent().text().replace('Launch Time', '').trim();
                         console.log(`Horário real extraído do texto após "Launch Time": "${realLaunchTimeText}"`);
                     }
@@ -186,18 +212,13 @@ async function verificarStatusLançamento(client) {
                     let realLaunchTime = null;
                     let unixTimestamp = null;
 
-                    // Verificar se o texto contém uma data válida ou "NET"
                     if (realLaunchTimeText.toUpperCase().startsWith('NET')) {
                         console.log(`Lançamento ${launch.name} ainda está previsto para ${realLaunchTimeText}.`);
-                        // Manter status como 'pending' e não atualizar data/hora real
                     } else {
-                        // Tentar parsear a data
                         let parsedDate = new Date(realLaunchTimeText);
                         console.log(`Data parseada inicialmente: ${parsedDate}`);
 
-                        // Se a data não for válida, tentar ajustar o formato
                         if (isNaN(parsedDate)) {
-                            // Remover possíveis caracteres indesejados
                             const cleanedText = realLaunchTimeText.replace(/BRT|BST|UTC|GMT|\+[\d]{4}/g, '').trim();
                             console.log(`Tentando parsear a data limpa: "${cleanedText}"`);
                             parsedDate = new Date(cleanedText);
@@ -215,7 +236,7 @@ async function verificarStatusLançamento(client) {
                         }
                     }
 
-                    // Atualizar o status e, se disponível, o horário real no banco de dados
+                    // Se o status não está mais 'pending', considerar que o lançamento ocorreu e atualizar
                     if (status !== 'pending') {
                         db.run(
                             `UPDATE launches SET status = ?, real_date = ?, real_time = ? WHERE id = ?`,
@@ -228,14 +249,37 @@ async function verificarStatusLançamento(client) {
                                         `Dados atualizados para o lançamento ${launch.name}: Status=${status}, Real Date=${realLaunchDate || 'NULL'}, Real Time=${realLaunchTime || 'NULL'}`
                                     );
                                     const channel = await client.channels.fetch(process.env.CHANNEL_ROCKETS_ID);
-                                    const message = await channel.messages.fetch(launch.message_id);
-                                    await message.edit(`🚀 **${launch.name}** foi lançado em <t:${unixTimestamp}:R>. Status: ${status === 'success' ? '✅ Sucesso' : '❌ Falha'} - [Mais informações](${launch.link})`);
+                                    try {
+                                        const message = await channel.messages.fetch(launch.message_id);
+                                        await message.edit(`🚀 **${launch.name}** foi lançado em <t:${unixTimestamp}:R>. Status: ${status === 'success' ? '✅ Sucesso' : '❌ Falha'} - [Mais informações](${launch.link})`);
+                                    } catch (error) {
+                                        console.error(`Erro ao editar mensagem para lançamento ${launch.id}:`, error);
+                                    }
                                 }
                             }
                         );
-
-                        // Logar o status atualizado
                         console.log(`Lançamento ${launch.name} concluído com status: ${status}.`);
+                    }
+                    // Caso o status permaneça 'pending', mas o site forneça nova data/hora, atualizar a mensagem como reagendamento
+                    else if (realLaunchDate && realLaunchTime && unixTimestamp) {
+                        db.run(
+                            `UPDATE launches SET real_date = ?, real_time = ? WHERE id = ?`,
+                            [realLaunchDate, realLaunchTime, launch.id],
+                            async function(err) {
+                                if (err) {
+                                    console.error(`Erro ao atualizar dados para o lançamento ${launch.id}:`, err);
+                                } else {
+                                    console.log(`Evento ${launch.name} reagendado para: ${realLaunchDate} ${realLaunchTime}.`);
+                                    const channel = await client.channels.fetch(process.env.CHANNEL_ROCKETS_ID);
+                                    try {
+                                        const message = await channel.messages.fetch(launch.message_id);
+                                        await message.edit(`🚀 **${launch.name}** foi reagendado para <t:${unixTimestamp}:R>. - [Mais informações](${launch.link})`);
+                                    } catch (error) {
+                                        console.error(`Erro ao editar mensagem para lançamento ${launch.id}:`, error);
+                                    }
+                                }
+                            }
+                        );
                     }
 
                 } catch (error) {
