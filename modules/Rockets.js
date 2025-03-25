@@ -312,10 +312,14 @@ module.exports = {
         }
 
         // Agendar verificações periódicas
-        setInterval(() => {
-            fetchAndStoreEvents(calendar, calendarId, client)
-                .then(() => console.log('Verificação de status concluída.'))
-                .catch(err => console.error('Erro na verificação de status:', err));
+        setInterval(async () => {
+            try {
+                await fetchAndStoreEvents(calendar, calendarId, client)
+                await verificarStatusLançamento(client);
+                console.log('Verificação de eventos e status concluída.');
+            } catch (error) {
+                console.error('Erro na verificação periódica:', error);
+            }
         }, 60 * 60 * 1000); // 60 minutos
     },
 };
