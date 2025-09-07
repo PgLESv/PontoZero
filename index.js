@@ -8,7 +8,11 @@ const client = new Client({
         GatewayIntentBits.Guilds,
         GatewayIntentBits.GuildMessages,
         GatewayIntentBits.GuildMessageReactions,
-        GatewayIntentBits.MessageContent
+        GatewayIntentBits.MessageContent,
+        GatewayIntentBits.GuildMembers,
+        GatewayIntentBits.GuildMessages,
+        GatewayIntentBits.MessageContent,
+        GatewayIntentBits.GuildVoiceStates
     ]
 });
 
@@ -17,11 +21,16 @@ const eventFiles = fs.readdirSync(eventsPath).filter(file => file.endsWith('.js'
 
 for (const file of eventFiles) {
     const filePath = path.join(eventsPath, file);
-    const event = require(filePath);
-    if (event.once) {
-        client.once(event.name, (...args) => event.execute(...args, client));
-    } else {
-        client.on(event.name, (...args) => event.execute(...args, client));
+    try {
+        const event = require(filePath);
+        if (event.once) {
+            client.once(event.name, (...args) => event.execute(...args, client));
+        } else {
+            client.on(event.name, (...args) => event.execute(...args, client));
+        }
+        console.log(`Evento carregado: ${event.name}`);
+    } catch (err) {
+        console.error(`Erro ao carregar evento ${file}:`, err);
     }
 }
 
@@ -32,9 +41,14 @@ client.once('ready', () => {
 
     for (const file of moduleFiles) {
         const filePath = path.join(modulesPath, file);
-        const module = require(filePath);
-        if (module.execute) {
-            module.execute(client);
+        try {
+            const module = require(filePath);
+            if (typeof module.execute === 'function') {
+                module.execute(client);
+                console.log(`Módulo executado: ${file}`);
+            }
+        } catch (err) {
+            console.error(`Erro ao executar módulo ${file}:`, err);
         }
     }
 });

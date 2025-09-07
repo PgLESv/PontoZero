@@ -5,3 +5,4 @@ package-lock.json
 modules/Rockets.txt
 config/rockets.db
 modules/CloudflareIp.js
+config/voiceStats.db

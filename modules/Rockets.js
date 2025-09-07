@@ -36,6 +36,20 @@ db.serialize(() => {
     });
 });
 
+// == ADICIONAR: helper para buscar mensagem com fallback ==
+async function safeFetchMessage(channel, id) {
+    if (!id) return null;
+    try {
+        return await channel.messages.fetch(id);
+    } catch (err) {
+        if (err.code === 10008) { // Unknown Message
+            console.warn(`[Rockets] Mensagem ${id} inexistente (apagada?). Será recriada.`);
+            return null;
+        }
+        throw err;
+    }
+}
+
 async function fetchAndStoreEvents(calendar, calendarId, client) {
     const now = new Date();
     const oneMonthLater = new Date();
@@ -250,17 +264,23 @@ async function verificarStatusLançamento(client) {
                                     );
                                     const channel = await client.channels.fetch(process.env.CHANNEL_ROCKETS_ID);
                                     try {
-                                        const message = await channel.messages.fetch(launch.message_id);
-                                        await message.edit(`🚀 **${launch.name}** foi lançado em <t:${unixTimestamp}:R>. Status: ${status === 'success' ? '✅ Sucesso' : '❌ Falha'} - [Mais informações](${launch.link})`);
+                                        let message = await safeFetchMessage(channel, launch.message_id);
+                                        const unix = unixTimestamp || Math.floor(Date.now()/1000);
+                                        const content = `🚀 **${launch.name}** foi lançado em <t:${unix}:R>. Status: ${status === 'success' ? '✅ Sucesso' : '❌ Falha'} - [Mais informações](${launch.link})`;
+                                        if (!message) {
+                                            message = await channel.send(content);
+                                            db.run(`UPDATE launches SET message_id = ? WHERE id = ?`, [message.id, launch.id]);
+                                        } else {
+                                            await message.edit(content);
+                                        }
                                     } catch (error) {
-                                        console.error(`Erro ao editar mensagem para lançamento ${launch.id}:`, error);
+                                        console.error(`Erro ao publicar/editar mensagem para lançamento ${launch.id}:`, error);
                                     }
                                 }
                             }
                         );
                         console.log(`Lançamento ${launch.name} concluído com status: ${status}.`);
                     }
-                    // Caso o status permaneça 'pending', mas o site forneça nova data/hora, atualizar a mensagem como reagendamento
                     else if (realLaunchDate && realLaunchTime && unixTimestamp) {
                         db.run(
                             `UPDATE launches SET real_date = ?, real_time = ? WHERE id = ?`,
@@ -272,10 +292,16 @@ async function verificarStatusLançamento(client) {
                                     console.log(`Evento ${launch.name} reagendado para: ${realLaunchDate} ${realLaunchTime}.`);
                                     const channel = await client.channels.fetch(process.env.CHANNEL_ROCKETS_ID);
                                     try {
-                                        const message = await channel.messages.fetch(launch.message_id);
-                                        await message.edit(`🚀 **${launch.name}** foi reagendado para <t:${unixTimestamp}:R>. - [Mais informações](${launch.link})`);
+                                        let message = await safeFetchMessage(channel, launch.message_id);
+                                        const content = `🚀 **${launch.name}** foi reagendado para <t:${unixTimestamp}:R>. - [Mais informações](${launch.link})`;
+                                        if (!message) {
+                                            message = await channel.send(content);
+                                            db.run(`UPDATE launches SET message_id = ? WHERE id = ?`, [message.id, launch.id]);
+                                        } else {
+                                            await message.edit(content);
+                                        }
                                     } catch (error) {
-                                        console.error(`Erro ao editar mensagem para lançamento ${launch.id}:`, error);
+                                        console.error(`Erro ao publicar/editar mensagem reagendada ${launch.id}:`, error);
                                     }
                                 }
                             }
